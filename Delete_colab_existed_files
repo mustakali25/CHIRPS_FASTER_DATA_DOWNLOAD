@@ -1,0 +1,12 @@
+Use this python code to delete if any existed files with same name existed
+
+import shutil
+import os
+
+folder_path = '/content/chirps_downloads'  # or '/content/excel_files'
+
+if os.path.exists(folder_path):
+    shutil.rmtree(folder_path)
+    print(f"Deleted folder: {folder_path}")
+else:
+    print(f"Folder does not exist: {folder_path}")
