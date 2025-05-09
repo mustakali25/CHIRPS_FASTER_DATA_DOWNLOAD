@@ -1,0 +1,148 @@
+import os
+import pandas as pd
+import requests
+from tqdm import tqdm
+import concurrent.futures
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from zipfile import ZipFile
+import glob
+from google.colab import files
+
+# Step 1: Install dependencies
+!pip install openpyxl
+
+# Step 2: Specify directories
+download_dir = "/content/chirps_downloads"
+excel_folder = "/content/excel_files"
+os.makedirs(download_dir, exist_ok=True)
+os.makedirs(excel_folder, exist_ok=True)
+print(f"Files will be saved to: {download_dir}")
+print(f"Excel files will be uploaded to: {excel_folder}")
+
+# Step 3: Upload Excel files
+print("Please upload all your .xlsx files (e.g., datatable2011.xlsx)...")
+uploaded = files.upload()
+for filename, content in uploaded.items():
+    if not filename.lower().endswith(('.xlsx', '.xls')):
+        print(f"Skipping {filename}: Not an Excel file (.xlsx or .xls)")
+        continue
+    with open(os.path.join(excel_folder, filename), 'wb') as f:
+        f.write(content)
+print(f"Uploaded files: {list(uploaded.keys())}")
+
+# Step 4: Find all Excel files
+excel_files = glob.glob(os.path.join(excel_folder, "*.[xX][lL][sS]*"))
+if not excel_files:
+    raise FileNotFoundError(f"No Excel files (.xlsx or .xls) found in {excel_folder}. Please upload .xlsx files.")
+print(f"Found {len(excel_files)} Excel files to process: {excel_files}")
+
+# Download function with percentage progress and retries
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    retry=retry_if_exception_type(requests.exceptions.RequestException)
+)
+def download_file(url, download_dir):
+    try:
+        filename = os.path.basename(url)
+        file_path = os.path.join(download_dir, filename)
+
+        if os.path.exists(file_path):
+            return f"Skipped {filename} (already exists)"
+
+        # Get file size
+        response = requests.head(url)
+        total_size = int(response.headers.get('Content-Length', 0))
+
+        # Stream download
+        r = requests.get(url, stream=True)
+        downloaded_size = 0
+        chunk_size = 8192
+
+        with open(file_path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded_size += len(chunk)
+                    if total_size > 0:
+                        percent = (downloaded_size / total_size) * 100
+                        print(f"\rDownloading {filename}: {percent:.1f}%", end='')
+                    else:
+                        print(f"\rDownloading {filename}: {downloaded_size} bytes", end='')
+
+        print()  # Newline after completion
+        return f"Downloaded {filename}"
+    except requests.exceptions.RequestException as e:
+        print(f"\nError downloading {filename}: {e}")
+        try:
+            r = requests.get(url, stream=True, verify=False)
+            downloaded_size = 0
+            with open(file_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        if total_size > 0:
+                            percent = (downloaded_size / total_size) * 100
+                            print(f"\rDownloading {filename}: {percent:.1f}% (SSL bypass)", end='')
+                        else:
+                            print(f"\rDownloading {filename}: {downloaded_size} bytes (SSL bypass)", end='')
+            print()
+            return f"Downloaded {filename} (SSL bypass)"
+        except requests.exceptions.RequestException as e2:
+            print(f"\nError downloading {filename} with SSL bypass: {e2}")
+            return f"Error downloading {filename}: {e2}"
+
+# Step 5: Process each Excel file
+for excel_file in excel_files:
+    print(f"\nProcessing: {excel_file}")
+
+    # Read Excel file
+    try:
+        df = pd.read_excel(excel_file)
+    except Exception as e:
+        print(f"Error reading {excel_file}: {e}")
+        continue
+
+    url_column = 'File_Name'
+    if url_column not in df.columns:
+        print(f"Column '{url_column}' not found in {excel_file}. Available columns: {df.columns}")
+        continue
+
+    urls = df[url_column].dropna().tolist()
+    print(f"Found {len(urls)} URLs to download in {excel_file}")
+
+    # Extract year from Excel filename (e.g., 'datatable2011 (1).xlsx' -> '2011')
+    base_filename = os.path.basename(excel_file)
+    year = ''.join(filter(str.isdigit, base_filename.split('.')[0].replace('datatable', '')))
+
+    # Download files in parallel
+    print(f"Downloading {len(urls)} files for year {year}...")
+    download_tasks = [(url, download_dir) for url in urls]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(tqdm(
+            executor.map(lambda x: download_file(*x), download_tasks),
+            total=len(download_tasks),
+            desc=f"Downloading files for {year}"
+        ))
+
+    # Print results
+    for result in results:
+        print(result)
+
+    # Zip all files for this year
+    zip_filename = os.path.join(download_dir, f'chirps_downloads_{year}.zip')
+    with ZipFile(zip_filename, 'w') as zipf:
+        for root, _, files_in_dir in os.walk(download_dir):
+            for file in files_in_dir:
+                if file.endswith('.zip') or file.lower().endswith(('.xlsx', '.xls')):
+                    continue
+                full_path = os.path.join(root, file)
+                arcname = os.path.relpath(full_path, download_dir)
+                zipf.write(full_path, arcname)
+
+    print(f"Created ZIP: {zip_filename}")
+    files.download(zip_filename)
+
+print("\n✅ All done!")
