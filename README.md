@@ -51,3 +51,5 @@ Fast, repeatable, and cloud-based
 No need to deal with complicated APIs or FTP clients
 
 CHIRPS data is often updated regularly — this makes it easy to re-run downloads
+
+using this Site https://data.chc.ucsb.edu/products/CHIRPS-2.0/
